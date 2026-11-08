@@ -25,7 +25,7 @@ raft.github.io includes RaftScope as a git submodule at `raftscope/` and shows `
 
 ```sh
 # in a checkout of raft/raft.github.io
-git submodule set-url raftscope https://github.com/OWNER/raftscope-rs
+git submodule set-url raftscope https://github.com/naolduga/raftscope-rs
 git submodule update --init --remote raftscope
 python3 -m http.server   # open http://localhost:8000/#raftscope
 ```

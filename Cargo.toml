@@ -6,7 +6,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "ISC"
-repository = "https://github.com/OWNER/raftscope-rs"
+repository = "https://github.com/naolduga/raftscope-rs"
 
 [profile.release]
 opt-level = 3
