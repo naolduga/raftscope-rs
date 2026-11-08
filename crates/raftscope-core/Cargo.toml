@@ -1,0 +1,9 @@
+[package]
+name = "raftscope-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic, event-driven Raft simulator (a Rust port of RaftScope's raft.js)"
+
+[dependencies]

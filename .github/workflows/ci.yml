@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main, gadaa]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo test --release
+
+  browser-build:
+    name: dist/ builds and runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Smoke-test the committed dist/
+        run: node scripts/smoke.mjs
+      - name: Rebuild dist/ from source
+        run: |
+          npm install -g binaryen@123
+          scripts/build.sh
+      - name: Smoke-test the fresh build
+        run: node scripts/smoke.mjs
+      - name: Upload the fresh build
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  bench-smoke:
+    name: benchmark runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo run --release -p raftscope-bench -- --n 5,51 --secs 5 --seeds 2

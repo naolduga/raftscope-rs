@@ -1,0 +1,10 @@
+[package]
+name = "raftscope-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+raftscope-core = { path = "../raftscope-core" }

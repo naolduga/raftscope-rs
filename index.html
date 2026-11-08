@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raft Scope</title>
+<!--
+  RaftScope.rs: drop-in replacement for ongardie/raftscope's index.html.
+  Fits the 800x580 iframe on raft.github.io, makes no network requests beyond
+  its own files, and keeps the original's controls and keyboard shortcuts.
+  ?theme=dark or ?theme=auto opts into a dark palette (default: light).
+  ?servers=N&seed=S configure the cluster. lab.html has the full controls.
+-->
+<style>
+:root {
+  --bg: #ffffff; --panel: #ffffff; --fg: #1b2430; --muted: #5f6b78; --line: #d9dee4; --surface: #eef1f4;
+  --accent: #b7791f; --danger: #c2413b; --ok: #2f7d4f;
+  --msg-vote: #7c4dbc; --msg-append: #1d7c8c; --msg-transfer: #d0642b; --on-term: #0e141b;
+  --t0: #8fb8de; --t1: #e3a76f; --t2: #9ccf8f; --t3: #d996b8; --t4: #e6d074; --t5: #8fd0c8; --t6: #b8a6e6; --t7: #e39a8f;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --bg: #11161c; --panel: #171e26; --fg: #e3e9ef; --muted: #96a3b0; --line: #2b3642; --surface: #202a35;
+  --accent: #f0b44c; --danger: #ef6a63; --ok: #5cc285;
+  --msg-vote: #b28cf0; --msg-append: #4fc3d4; --msg-transfer: #f38b4f; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 var(--font); }
+main { max-width: 800px; margin: 0 auto; padding: 8px; display: grid; gap: 6px; }
+canvas { display: block; width: 100%; cursor: pointer; touch-action: manipulation; }
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.row input[type=range] { flex: 1 1 200px; min-width: 0; accent-color: var(--accent); }
+.clock, .speed { font: 12px var(--mono); font-variant-numeric: tabular-nums; min-width: 7.5ch; }
+.status { font-size: 12px; color: var(--muted); margin-left: auto; }
+.status.bad { color: var(--danger); font-weight: 600; }
+button { font: 600 12px var(--font); color: var(--fg); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 5px; padding: 4px 9px; cursor: pointer; }
+button:hover { background: var(--surface); }
+:is(button, input, canvas):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.icon { width: 30px; padding: 4px 0; }
+#menu { position: fixed; z-index: 5; min-width: 190px; max-width: 280px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; box-shadow: 0 6px 20px rgb(0 0 0 / 0.14); padding: 8px; display: grid; gap: 6px; }
+#menu h2 { margin: 0; font-size: 13px; }
+#menu dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 1px 10px; font: 11.5px var(--mono); }
+#menu dt { color: var(--muted); }
+#menu dd { margin: 0; overflow-wrap: anywhere; }
+#menu .acts { display: flex; flex-wrap: wrap; gap: 4px; }
+dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--fg); max-width: 440px; padding: 14px 18px; }
+dialog::backdrop { background: rgb(0 0 0 / 0.25); }
+dialog h2 { margin: 0 0 8px; font-size: 15px; }
+dialog table { border-collapse: collapse; width: 100%; }
+dialog td { padding: 3px 6px; vertical-align: top; }
+dialog td:first-child { font: 600 12px var(--mono); white-space: nowrap; }
+dialog p { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+dialog a { color: inherit; }
+.err { color: var(--danger); margin: 0; }
+</style>
+
+<main>
+  <canvas id="cv" tabindex="0" aria-label="Raft cluster: servers on a ring with messages in flight; logs on the right"></canvas>
+  <p class="err" id="err" hidden></p>
+  <div class="row">
+    <button id="play" class="icon" title="Timeline; click to pause/play (space)" aria-label="Pause">&#10074;&#10074;</button>
+    <input id="time" type="range" min="0" max="1000" step="1" value="0" aria-label="Timeline">
+    <span class="clock" id="clock">0.000s</span>
+  </div>
+  <div class="row">
+    <span title="Simulation speed" aria-hidden="true">&#9201;</span>
+    <input id="speed" type="range" min="0" max="3" step="0.01" value="2" aria-label="Simulation speed (faster to the right)" style="direction: rtl">
+    <span class="speed" id="speed-label">1/100x</span>
+    <span class="status" id="status" aria-live="polite"></span>
+    <button id="help-btn" class="icon" title="Keyboard shortcuts (?)" aria-label="Help">?</button>
+  </div>
+</main>
+
+<div id="menu" role="menu" hidden></div>
+
+<dialog id="help">
+  <h2>Keyboard shortcuts</h2>
+  <table>
+    <tr><td>space / .</td><td>Pause/unpause</td></tr>
+    <tr><td>?</td><td>Help</td></tr>
+    <tr><td>C</td><td>Submit client request to leader of highest term, if any</td></tr>
+    <tr><td>R</td><td>Restart leader of highest term, if any</td></tr>
+    <tr><td>T</td><td>Adjust election timers to avoid a split vote</td></tr>
+    <tr><td>A</td><td>Align election timers to encourage a split vote</td></tr>
+    <tr><td>L</td><td>Set up log replication start scenario</td></tr>
+    <tr><td>B</td><td>Resume all servers</td></tr>
+    <tr><td>F</td><td>Fork playback, discarding future</td></tr>
+  </table>
+  <p>Click a server or a message for details and actions. Drag the timeline to go back in time. A red status means a Raft safety property was violated.</p>
+  <p><a href="lab.html" target="_blank" rel="noopener">More servers, faults and benchmarks</a></p>
+  <form method="dialog"><p><button>Close</button></p></form>
+</dialog>
+
+<script type="module">
+import { loadRaftScope, OP } from './raftscope.js';
+
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const theme = params.get('theme');
+if (theme === 'dark' || (theme === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches)) {
+  document.documentElement.dataset.theme = 'dark';
+}
+
+let mod;
+try {
+  mod = await loadRaftScope();
+} catch (e) {
+  $('err').hidden = false;
+  $('err').textContent = `The simulator could not start: ${e?.message ?? e}`;
+  throw e;
+}
+const int = (k, d, lo, hi) => { const v = parseInt(params.get(k) ?? '', 10); return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d; };
+const sim = mod.create({ n: int('servers', 5, 1, 2000), seed: int('seed', Math.floor(Math.random() * 1e9), 0, 2 ** 52) });
+
+const cv = $('cv'), ctx = cv.getContext('2d');
+const SLOTS = ['--panel','--fg','--muted','--line','--surface','--accent','--danger','--msg-vote','--msg-append',
+  '--msg-transfer','--t0','--t1','--t2','--t3','--t4','--t5','--t6','--t7','--on-term'];
+const cs = getComputedStyle(document.documentElement);
+const palette = SLOTS.map((v) => cs.getPropertyValue(v).trim());
+const font = cs.getPropertyValue('--font');
+let W = 0, H = 0;
+function resize() {
+  const dpr = devicePixelRatio || 1;
+  // Use the frame's height when there is room (the Raft site embeds this in 800x580).
+  W = cv.clientWidth;
+  H = Math.round(Math.min(Math.max(mod.preferredHeight(W), innerHeight - 96), W * 0.62));
+  cv.style.height = H + 'px'; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+new ResizeObserver(resize).observe(cv);
+
+// --- playback (RaftScope semantics: speed slider is log10 of the slowdown) --
+let playing = true, last = null, scrubbing = false, selected = null;
+const slowdown = () => Math.max(1, 10 ** Number($('speed').value));
+function setPlaying(p) {
+  playing = p;
+  $('play').innerHTML = p ? '&#10074;&#10074;' : '&#9654;';
+  $('play').setAttribute('aria-label', p ? 'Pause' : 'Play');
+}
+function frame(ts) {
+  if (playing && last !== null && ts - last < 500) sim.seek(sim.time + ((ts - last) * 1000) / slowdown());
+  last = ts;
+  ctx.clearRect(0, 0, W, H);
+  sim.draw(ctx, W, H, palette, selected?.kind === 'server' ? selected.id : -1, 20000, font);
+  const t = sim.time, hz = Math.max(sim.horizon, t, 1);
+  $('clock').textContent = (t / 1e6).toFixed(3) + 's';
+  if (!scrubbing) $('time').value = Math.round((t / hz) * 1000);
+  if (ts - lastStatus > 250) { lastStatus = ts; status(); if (selected) showMenu(); }
+  requestAnimationFrame(frame);
+}
+let lastStatus = 0;
+function status() {
+  const st = sim.stats(), el = $('status');
+  const lead = st.leader >= 0 ? `leader S${st.leader + 1}, term ${st.leaderTerm}` : 'no leader';
+  el.textContent = st.violationCount ? `${lead} · safety violated (${st.violationCount})` : `${lead} · invariants hold`;
+  el.className = 'status' + (st.violationCount ? ' bad' : '');
+  el.title = st.violations.join('\n');
+}
+$('speed').addEventListener('input', () => { $('speed-label').textContent = `1/${slowdown().toFixed(0)}x`; });
+$('play').onclick = () => setPlaying(!playing);
+$('time').addEventListener('input', (e) => {
+  scrubbing = true; setPlaying(false);
+  sim.seek((Number(e.target.value) / 1000) * Math.max(sim.horizon, 1));
+});
+$('time').addEventListener('change', () => { scrubbing = false; });
+
+// --- click menu: details + actions (RaftScope's context menu and modal) -----
+const menu = $('menu');
+let menuAt = [0, 0];
+const ACTIONS = [['stop', 'Stop'], ['resume', 'Resume'], ['restart', 'Restart'], ['timeout', 'Time out'], ['request', 'Request']];
+function hideMenu() { menu.hidden = true; selected = null; }
+function showMenu() {
+  let title, rows, acts;
+  if (selected.kind === 'server') {
+    const s = sim.server(selected.id);
+    title = `S${s.id + 1} · ${s.role} · term ${s.term}`;
+    rows = [['votedFor', s.votedFor >= 0 ? `S${s.votedFor + 1}` : '—'], ['log', s.logLength], ['commitIndex', s.commitIndex],
+      ['electionAlarm', s.electionAlarm >= 0 ? (s.electionAlarm / 1e6).toFixed(3) + 's' : '∞']];
+    if (s.peers) rows.push(['next/match', s.peers.map((p) => `S${p.id + 1} ${p.next}/${p.match}`).join(', ')]);
+    acts = ACTIONS;
+  } else {
+    const m = sim.message(selected.id);
+    if (!m) return hideMenu(); // delivered
+    title = `${m.kind} · S${m.from + 1} → S${m.to + 1}`;
+    rows = [['term', m.term], ['sent', (m.sent / 1e6).toFixed(4) + 's'], ['arrives', (m.arrives / 1e6).toFixed(4) + 's']];
+    for (const k of ['granted', 'success', 'matchIndex', 'lastLogTerm', 'lastLogIndex', 'prevIndex', 'prevTerm', 'entries', 'commitIndex'])
+      if (k in m) rows.push([k, String(m[k])]);
+    acts = [['drop', 'Drop']];
+  }
+  const h = document.createElement('h2'); h.textContent = title;
+  const dl = document.createElement('dl');
+  for (const [k, v] of rows) dl.append(Object.assign(document.createElement('dt'), { textContent: k }), Object.assign(document.createElement('dd'), { textContent: v }));
+  const box = document.createElement('div'); box.className = 'acts';
+  for (const [op, label] of acts) {
+    const b = Object.assign(document.createElement('button'), { textContent: label, role: 'menuitem' });
+    b.onclick = () => {
+      if (op === 'drop') { sim.op(OP.dropMessage, selected.id); hideMenu(); }
+      else sim.op(OP[op], selected.id);
+    };
+    box.append(b);
+  }
+  menu.replaceChildren(h, dl, box);
+  menu.hidden = false;
+  const r = menu.getBoundingClientRect();
+  menu.style.left = Math.min(menuAt[0] + 8, innerWidth - r.width - 8) + 'px';
+  menu.style.top = Math.min(menuAt[1] + 8, innerHeight - r.height - 8) + 'px';
+}
+function pickAt(e) {
+  const r = cv.getBoundingClientRect();
+  const hit = sim.pick(W, H, e.clientX - r.left, e.clientY - r.top);
+  if (!hit) return hideMenu();
+  selected = hit > 0 ? { kind: 'server', id: hit - 1 } : { kind: 'message', id: -hit - 1 };
+  menuAt = [e.clientX, e.clientY];
+  showMenu();
+}
+cv.addEventListener('click', pickAt);
+cv.addEventListener('contextmenu', (e) => { e.preventDefault(); pickAt(e); });
+document.addEventListener('pointerdown', (e) => { if (!menu.contains(e.target) && e.target !== cv) hideMenu(); });
+
+// --- keyboard (same keys as RaftScope) ---------------------------------------
+$('help-btn').onclick = () => { setPlaying(false); $('help').showModal(); };
+addEventListener('keydown', (e) => {
+  if (e.target.closest('input') || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key;
+  if (k === ' ' || k === '.') { e.preventDefault(); $('help').close(); setPlaying(!playing); }
+  else if (k === '?') { setPlaying(false); $('help').showModal(); }
+  else if (k === 'Escape') hideMenu();
+  else {
+    const op = { c: OP.requestToLeader, r: OP.restartLeader, t: OP.spreadTimers, a: OP.alignTimers,
+      l: OP.logReplicationScenario, b: OP.resumeAll, f: OP.fork }[k.toLowerCase()];
+    if (op === undefined) return;
+    if (op === OP.logReplicationScenario) setPlaying(false);
+    sim.op(op);
+    $('help').close();
+  }
+});
+
+resize();
+requestAnimationFrame(frame);
+</script>
+</html>

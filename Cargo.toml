@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/raftscope-core", "crates/raftscope-wasm", "crates/raftscope-bench"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "ISC"
+repository = "https://github.com/OWNER/raftscope-rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

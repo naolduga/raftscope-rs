@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RaftScope Lab</title>
+<style>
+/* Layout: one working column — status strip, the cluster canvas, a transport bar, then control panels that wrap into a grid. */
+:root {
+  --bg: #f3f5f7;
+  --panel: #ffffff;
+  --fg: #16202b;
+  --muted: #5b6876;
+  --line: #d5dbe2;
+  --surface: #e9edf1;
+  --accent: #b7791f;      /* the leader */
+  --danger: #c2413b;
+  --ok: #2f7d4f;
+  --msg-vote: #7c4dbc;
+  --msg-append: #1d7c8c;
+  --msg-transfer: #d0642b;
+  --on-term: #0e141b;
+  --t0: #8fb8de; --t1: #e3a76f; --t2: #9ccf8f; --t3: #d996b8;
+  --t4: #e6d074; --t5: #8fd0c8; --t6: #b8a6e6; --t7: #e39a8f;
+  --font-display: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-data: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f141a; --panel: #161d25; --fg: #e3e9ef; --muted: #91a0ae; --line: #2a3541; --surface: #1f2832;
+  --accent: #f0b44c; --danger: #ef6a63; --ok: #5cc285;
+  --msg-vote: #b28cf0; --msg-append: #4fc3d4; --msg-transfer: #f38b4f; color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #0f141a; --panel: #161d25; --fg: #e3e9ef; --muted: #91a0ae; --line: #2a3541; --surface: #1f2832;
+  --accent: #f0b44c; --danger: #ef6a63; --ok: #5cc285;
+  --msg-vote: #b28cf0; --msg-append: #4fc3d4; --msg-transfer: #f38b4f; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { background: var(--bg); color: var(--fg); font: 14px/1.45 var(--font-body); }
+.wrap { max-width: 1180px; margin: 0 auto; padding-block: 16px 40px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 12px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; }
+h1 { font: 600 26px/1.1 var(--font-display); margin: 0; letter-spacing: 0.01em; text-wrap: balance; }
+h1 small { font: 500 14px var(--font-data); color: var(--muted); margin-left: 6px; }
+.lede { color: var(--muted); margin: 0; flex: 1 1 320px; min-width: 0; }
+.lede a { color: var(--fg); }
+.status { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 500 12px var(--font-data); padding: 3px 8px; border-radius: 4px; background: var(--surface); color: var(--fg);
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chip b { font-weight: 500; color: var(--muted); margin-right: 4px; }
+.chip.leader { background: color-mix(in srgb, var(--accent) 22%, var(--panel)); }
+.chip.safe { background: color-mix(in srgb, var(--ok) 18%, var(--panel)); }
+.chip.unsafe { background: var(--danger); color: var(--panel); }
+.chip.unsafe b { color: var(--panel); }
+.stage { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+canvas { display: block; width: 100%; touch-action: manipulation; cursor: pointer; }
+.transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 10px 12px; border-top: 1px solid var(--line); }
+.transport input[type=range] { flex: 1 1 200px; min-width: 0; accent-color: var(--accent); }
+.clock { font: 500 13px var(--font-data); font-variant-numeric: tabular-nums; min-width: 9ch; }
+button, select, input[type=number] { font: 500 13px var(--font-body); color: var(--fg); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+input[type=number], input[type=text] { width: 100%; min-width: 0; font: 13px var(--font-data); color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+button { cursor: pointer; }
+button:hover:not(:disabled) { background: var(--surface); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: var(--fg); color: var(--panel); border-color: var(--fg); }
+button.primary:hover { background: var(--muted); }
+:is(button, select, input, canvas):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; align-items: start; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.panel h2 { font: 600 13px var(--font-display); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; }
+.kv { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; font: 13px var(--font-data); font-variant-numeric: tabular-nums; margin: 0; }
+.kv dt { color: var(--muted); font-family: var(--font-body); }
+.kv dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.form label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); }
+.form label.wide { grid-column: 1 / -1; }
+.hint { color: var(--muted); font-size: 12px; margin: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+.load-error { margin: 0; padding: 10px 12px; border-radius: 6px; background: color-mix(in srgb, var(--danger) 14%, var(--panel)); color: var(--fg); }
+.violations { color: var(--danger); font: 12px var(--font-data); margin: 0; padding-left: 18px; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font: 12px var(--font-data); font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--muted); font-weight: 500; }
+kbd { font: 11px var(--font-data); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; background: var(--surface); }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>RaftScope Lab <small>Rust · WebAssembly</small></h1>
+    <p class="lede">Raft consensus, simulated in Rust and drawn in your browser. Click a server or a message to inspect and act on it; drag the timeline to travel back. <a href="index.html">Classic view</a></p>
+  </header>
+
+  <div class="status" id="status" aria-live="polite"></div>
+  <p class="load-error" id="load-error" hidden></p>
+
+  <section class="stage" aria-label="Cluster">
+    <canvas id="cv" tabindex="0" aria-label="Raft cluster: servers on a ring with messages in flight, logs alongside"></canvas>
+    <div class="transport">
+      <button id="play" class="primary" aria-label="Play or pause">Pause</button>
+      <button id="back" title="Back 10 ms">−10 ms</button>
+      <button id="fwd" title="Forward 10 ms">+10 ms</button>
+      <select id="speed" aria-label="Playback speed">
+        <option value="0.001">1/1000×</option>
+        <option value="0.003">1/300×</option>
+        <option value="0.01" selected>1/100×</option>
+        <option value="0.03">1/30×</option>
+        <option value="0.1">1/10×</option>
+        <option value="1">1×</option>
+        <option value="10">10×</option>
+      </select>
+      <input id="scrub" type="range" min="0" max="1000" step="1" value="0" aria-label="Timeline">
+      <span class="clock" id="clock">0.000 s</span>
+    </div>
+  </section>
+
+  <div class="legend" aria-label="Legend">
+    <span><i style="background:var(--msg-vote)"></i>RequestVote</span>
+    <span><i style="background:var(--msg-append)"></i>AppendEntries</span>
+    <span><i style="border:2px solid var(--muted)"></i>hollow = reply</span>
+    <span>fill colour = term · faded log cell = not yet committed · grey arc = election timer</span>
+  </div>
+
+  <div class="panels">
+    <section class="panel" aria-labelledby="h-insp">
+      <h2 id="h-insp">Selection</h2>
+      <p class="hint" id="insp-empty">Tap a server or a message.</p>
+      <dl class="kv" id="insp" hidden></dl>
+      <div class="row" id="srv-actions" hidden>
+        <button data-op="stop">Stop</button>
+        <button data-op="resume">Resume</button>
+        <button data-op="restart">Restart</button>
+        <button data-op="timeout">Time out</button>
+        <button data-op="request">Client request</button>
+        <button data-op="isolate" id="isolate">Isolate</button>
+      </div>
+      <div class="row" id="msg-actions" hidden>
+        <button data-op="drop">Drop message</button>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="h-cluster">
+      <h2 id="h-cluster">Cluster</h2>
+      <div class="row">
+        <button id="req">Request to leader <kbd>C</kbd></button>
+        <button id="resumeall">Resume all</button>
+        <button id="heal">Heal partitions</button>
+        <button id="spread">Spread timers</button>
+        <button id="align">Align timers</button>
+        <button id="scenario">Log-replication scenario</button>
+      </div>
+      <dl class="kv" id="stats"></dl>
+      <ul class="violations" id="viol" hidden></ul>
+    </section>
+
+    <section class="panel" aria-labelledby="h-setup">
+      <h2 id="h-setup">Setup</h2>
+      <div class="form">
+        <label>Servers<input id="f-n" type="number" min="1" max="5000" value="5"></label>
+        <label>Seed<input id="f-seed" type="number" min="0" value="1"></label>
+        <label>Message loss (%)<input id="f-loss" type="number" min="0" max="100" step="1" value="0"></label>
+        <label>Election timeout (ms)<input id="f-et" type="number" min="5" value="100"></label>
+        <label>Auto requests every (ms, 0 = off)<input id="f-load" type="number" min="0" value="100"></label>
+        <label>Batch size<input id="f-batch" type="number" min="1" value="1"></label>
+        <label>Latency min–max (ms)<input id="f-lat" type="text" value="10-15" inputmode="numeric"></label>
+      </div>
+      <div class="row"><button class="primary" id="reset">Apply &amp; restart</button></div>
+      <p class="hint">Same seed and same actions give the same run, every time.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="h-bench">
+      <h2 id="h-bench">Benchmark</h2>
+      <p class="hint">Runs the simulator headless in this tab: 10 simulated seconds per size, a client request every 50 ms, current settings.</p>
+      <div class="row"><button id="bench">Run benchmark</button></div>
+      <div class="tablewrap"><table id="bench-t" hidden>
+        <thead><tr><th>servers</th><th>wall ms</th><th>× real time</th><th>events/s</th><th>elections</th><th>p50 commit</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </section>
+  </div>
+</div>
+
+<script type="module">
+import { loadRaftScope, OP } from './raftscope.js';
+
+const $ = (id) => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+let mod;
+try {
+  mod = await loadRaftScope();
+} catch (err) {
+  const el = $('load-error');
+  el.hidden = false;
+  el.textContent = `The simulator could not start in this browser: ${err?.message ?? err}. Try another browser, or run it locally (see the README).`;
+  throw err;
+}
+
+let sim, selected = null; // {kind:'server'|'message', id}
+let playing = true, lastTs = null;
+let W = 0, H = 0;
+
+// --- palette from CSS tokens --------------------------------------------
+const SLOTS = ['--panel','--fg','--muted','--line','--surface','--accent','--danger',
+  '--msg-vote','--msg-append','--msg-transfer','--t0','--t1','--t2','--t3','--t4','--t5','--t6','--t7','--on-term'];
+let palette = [];
+function readPalette() {
+  const cs = getComputedStyle(document.documentElement);
+  palette = SLOTS.map((v) => cs.getPropertyValue(v).trim());
+}
+readPalette();
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', readPalette);
+new MutationObserver(readPalette).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+// --- setup ----------------------------------------------------------------
+function readSetup() {
+  const num = (id, d) => { const v = Number($(id).value); return Number.isFinite(v) ? v : d; };
+  const [lo, hi] = $('f-lat').value.split(/[-–, ]+/).map(Number);
+  const minL = Number.isFinite(lo) && lo > 0 ? lo : 10;
+  const maxL = Number.isFinite(hi) && hi >= minL ? hi : minL;
+  return {
+    n: Math.max(1, Math.min(5000, Math.round(num('f-n', 5)))),
+    seed: Math.max(0, Math.round(num('f-seed', 1))),
+    loss: Math.max(0, Math.min(1, num('f-loss', 0) / 100)),
+    electionTimeout: num('f-et', 100) * 1000,
+    rpcTimeout: num('f-et', 100) * 500,
+    minLatency: minL * 1000, maxLatency: maxL * 1000,
+    clientInterval: num('f-load', 0) * 1000,
+    batchSize: Math.max(1, Math.round(num('f-batch', 1))),
+  };
+}
+function reset() {
+  sim?.free();
+  sim = mod.create(readSetup());
+  selected = null;
+  updatePanels(true);
+}
+
+// --- sizing ----------------------------------------------------------------
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = cv.parentElement.clientWidth;
+  H = Math.round(mod.preferredHeight(W));
+  cv.style.height = H + 'px';
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+new ResizeObserver(resize).observe(cv.parentElement);
+
+// --- frame loop ------------------------------------------------------------
+const font = getComputedStyle(document.body).getPropertyValue('--font-body') || 'sans-serif';
+function frame(ts) {
+  if (playing && lastTs !== null) {
+    const wall = Math.min(ts - lastTs, 100); // ms; cap after tab switches
+    sim.seek(sim.time + wall * 1000 * Number($('speed').value));
+  }
+  lastTs = ts;
+  ctx.clearRect(0, 0, W, H);
+  const sel = selected?.kind === 'server' ? selected.id : -1;
+  sim.draw(ctx, W, H, palette, sel, 20000, font);
+  updateClock();
+  requestAnimationFrame(frame);
+}
+let lastPanel = 0;
+function updateClock() {
+  const t = sim.time, hz = Math.max(sim.horizon, t, 1);
+  $('clock').textContent = (t / 1e6).toFixed(3) + ' s';
+  if (!scrubbing) $('scrub').value = Math.round((t / hz) * 1000);
+  const now = performance.now();
+  if (now - lastPanel > 200) { lastPanel = now; updatePanels(); }
+}
+
+// --- panels ----------------------------------------------------------------
+const fmt = (n) => n.toLocaleString('en-US');
+const ms = (us) => (us / 1000).toFixed(1) + ' ms';
+function kv(el, pairs) {
+  el.replaceChildren(...pairs.flatMap(([k, v]) => {
+    const dt = document.createElement('dt'); dt.textContent = k;
+    const dd = document.createElement('dd'); dd.textContent = v;
+    return [dt, dd];
+  }));
+}
+function chip(label, value, cls = '') {
+  const s = document.createElement('span'); s.className = 'chip ' + cls;
+  const b = document.createElement('b'); b.textContent = label;
+  s.append(b, value); return s;
+}
+function updatePanels() {
+  const st = sim.stats();
+  const lead = st.leader >= 0 ? `S${st.leader + 1} · term ${st.leaderTerm}` : 'none';
+  $('status').replaceChildren(
+    chip('servers', fmt(st.n)),
+    chip('leader', lead, st.leader >= 0 ? 'leader' : ''),
+    chip('max term', String(st.maxTerm)),
+    chip('committed', fmt(st.committed)),
+    chip('engine', mod.engine),
+    chip('safety', st.violationCount ? `${st.violationCount} violation(s)` : 'all invariants hold', st.violationCount ? 'unsafe' : 'safe'),
+  );
+  kv($('stats'), [
+    ['messages in flight', fmt(st.inFlight)],
+    ['sent / delivered', `${fmt(st.sent)} / ${fmt(st.delivered)}`],
+    ['lost (loss, partition)', fmt(st.lost)],
+    ['elections started', fmt(st.elections)],
+    ['leaders elected', fmt(st.leaders)],
+    ['client requests', `${fmt(st.requests)} (${fmt(st.rejected)} rejected)`],
+    ['commit latency p50 / p99', st.committed ? `${ms(st.p50)} / ${ms(st.p99)}` : '—'],
+    ['time without a leader', ms(st.leaderless)],
+    ['down / isolated', `${st.stopped} / ${st.partitioned}`],
+  ]);
+  const v = $('viol');
+  v.hidden = !st.violationCount;
+  v.replaceChildren(...st.violations.map((t) => Object.assign(document.createElement('li'), { textContent: t })));
+  updateInspector();
+}
+function updateInspector() {
+  const insp = $('insp');
+  let info = null;
+  if (selected?.kind === 'server') info = sim.server(selected.id);
+  if (selected?.kind === 'message') info = sim.message(selected.id);
+  if (selected?.kind === 'message' && !info) selected = null; // delivered
+  $('insp-empty').hidden = !!info;
+  insp.hidden = !info;
+  $('srv-actions').hidden = selected?.kind !== 'server';
+  $('msg-actions').hidden = selected?.kind !== 'message';
+  if (!info) return;
+  if (selected.kind === 'server') {
+    const rows = [
+      ['server', `S${info.id + 1}`], ['role', info.role], ['term', info.term],
+      ['voted for', info.votedFor >= 0 ? `S${info.votedFor + 1}` : '—'],
+      ['log length', info.logLength], ['commit index', info.commitIndex],
+      ['election alarm', info.electionAlarm >= 0 ? (info.electionAlarm / 1e6).toFixed(3) + ' s' : 'none (leader)'],
+      ['partition', info.group ? `isolated (group ${info.group})` : 'connected'],
+    ];
+    if (info.role === 'candidate') rows.push(['votes granted', info.votes + 1]);
+    if (info.peers) rows.push(['next / match', info.peers.map((p) => `S${p.id + 1}:${p.next}/${p.match}`).join('  ')]);
+    kv(insp, rows);
+    $('isolate').textContent = info.group ? 'Reconnect' : 'Isolate';
+  } else {
+    const rows = [['message', `#${info.seq}`], ['type', info.kind], ['from → to', `S${info.from + 1} → S${info.to + 1}`],
+      ['term', info.term], ['sent', (info.sent / 1e6).toFixed(4) + ' s'], ['arrives', (info.arrives / 1e6).toFixed(4) + ' s']];
+    for (const k of ['granted', 'success', 'matchIndex', 'lastLogTerm', 'lastLogIndex', 'prevIndex', 'prevTerm', 'entries', 'commitIndex'])
+      if (k in info) rows.push([k, String(info[k])]);
+    if (info.lost) rows.push(['fate', 'will be lost']);
+    kv(insp, rows);
+  }
+}
+
+// --- interaction -----------------------------------------------------------
+cv.addEventListener('pointerdown', (e) => {
+  const r = cv.getBoundingClientRect();
+  const hit = sim.pick(W, H, e.clientX - r.left, e.clientY - r.top);
+  if (hit > 0) selected = { kind: 'server', id: hit - 1 };
+  else if (hit < 0) selected = { kind: 'message', id: -hit - 1 };
+  else selected = null;
+  updateInspector();
+});
+$('srv-actions').addEventListener('click', (e) => {
+  const op = e.target.closest('button')?.dataset.op;
+  if (!op || selected?.kind !== 'server') return;
+  const id = selected.id;
+  if (op === 'isolate') {
+    const info = sim.server(id);
+    sim.op(OP.setGroup, id, info.group ? 0 : 1);
+  } else sim.op(OP[op], id);
+  updatePanels();
+});
+$('msg-actions').addEventListener('click', () => {
+  if (selected?.kind === 'message') { sim.op(OP.dropMessage, selected.id); selected = null; updatePanels(); }
+});
+$('req').onclick = () => { sim.op(OP.requestToLeader); updatePanels(); };
+$('resumeall').onclick = () => sim.op(OP.resumeAll);
+$('heal').onclick = () => sim.op(OP.heal);
+$('spread').onclick = () => sim.op(OP.spreadTimers);
+$('align').onclick = () => sim.op(OP.alignTimers);
+$('scenario').onclick = () => { sim.op(OP.logReplicationScenario); updatePanels(); };
+$('reset').onclick = reset;
+
+function setPlaying(p) { playing = p; $('play').textContent = p ? 'Pause' : 'Play'; }
+$('play').onclick = () => setPlaying(!playing);
+$('back').onclick = () => { setPlaying(false); sim.seek(Math.max(0, sim.time - 10_000)); updatePanels(); };
+$('fwd').onclick = () => { setPlaying(false); sim.seek(sim.time + 10_000); updatePanels(); };
+let scrubbing = false;
+$('scrub').addEventListener('input', (e) => {
+  scrubbing = true; setPlaying(false);
+  sim.seek((Number(e.target.value) / 1000) * Math.max(sim.horizon, 1));
+});
+$('scrub').addEventListener('change', () => { scrubbing = false; updatePanels(); });
+
+window.addEventListener('keydown', (e) => {
+  if (e.target.closest('input, select, textarea')) return;
+  if (e.key === ' ') { e.preventDefault(); setPlaying(!playing); }
+  else if (e.key === 'c' || e.key === 'C') sim.op(OP.requestToLeader);
+  else if (e.key === 'ArrowLeft') $('back').click();
+  else if (e.key === 'ArrowRight') $('fwd').click();
+});
+
+// --- benchmark -------------------------------------------------------------
+$('bench').onclick = async () => {
+  const btn = $('bench'), t = $('bench-t'), body = t.querySelector('tbody');
+  btn.disabled = true; t.hidden = false; body.replaceChildren();
+  const base = readSetup();
+  for (const n of [5, 51, 201, 1001]) {
+    btn.textContent = `Running ${n} servers…`;
+    await new Promise((r) => setTimeout(r, 30));
+    const b = mod.create({ ...base, n, clientInterval: 50_000 });
+    const t0 = performance.now();
+    const events = b.runHeadless(10_000_000);
+    const wall = performance.now() - t0;
+    const st = b.stats(); b.free();
+    const tr = document.createElement('tr');
+    for (const v of [n, wall.toFixed(0), fmt(Math.round(10_000 / wall)), (events / wall / 1000).toFixed(2) + ' M',
+      st.elections, st.committed ? ms(st.p50) : '—'])
+      tr.append(Object.assign(document.createElement('td'), { textContent: String(v) }));
+    body.append(tr);
+  }
+  btn.textContent = 'Run again'; btn.disabled = false;
+};
+
+reset();
+resize();
+requestAnimationFrame(frame);
+</script>
