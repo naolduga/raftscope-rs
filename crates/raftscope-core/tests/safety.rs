@@ -1,5 +1,5 @@
 use raftscope_core::rng::Rng;
-use raftscope_core::sim::{Config, Role, Sim};
+use raftscope_core::sim::{Config, Protocol, Role, Sim};
 use raftscope_core::timeline::{Op, Timeline};
 
 fn cfg(n: usize, seed: u64) -> Config {
@@ -107,6 +107,51 @@ fn safety_under_chaos() {
 }
 
 #[test]
+fn rotation_visits_every_server() {
+    let mut sim = Sim::new(Config {
+        protocol: Protocol::Rotation {
+            term_length: 300_000,
+        },
+        client_interval: 25_000,
+        ..cfg(5, 3)
+    });
+    let mut seen = [false; 5];
+    let mut t = 0;
+    while t < 8_000_000 {
+        t += 10_000;
+        sim.advance_to(t);
+        if let Some(l) = sim.leader() {
+            seen[l.id as usize] = true;
+        }
+    }
+    assert!(seen.iter().all(|&b| b), "leaders seen: {seen:?}");
+    assert!(sim.stats.transfers >= 5);
+    assert!(
+        sim.checker.violations.is_empty(),
+        "{:?}",
+        sim.checker.violations
+    );
+}
+
+#[test]
+fn rotation_skips_a_dead_successor() {
+    let mut sim = Sim::new(Config {
+        protocol: Protocol::Rotation {
+            term_length: 200_000,
+        },
+        ..cfg(5, 11)
+    });
+    sim.advance_to(1_000_000);
+    let l = sim.leader().unwrap().id;
+    let succ = (l + 1) % 5;
+    sim.stop(succ);
+    sim.advance_to(4_000_000);
+    let now_leader = sim.leader().unwrap().id;
+    assert_ne!(now_leader, succ);
+    assert!(sim.checker.violations.is_empty());
+}
+
+#[test]
 fn timeline_seek_back_matches_straight_run() {
     let c = Config {
         client_interval: 40_000,
@@ -174,6 +219,28 @@ fn log_replication_scenario_matches_raftscope() {
     // Only 2 of 5 up: replicated to S2 but never committed.
     assert_eq!(sim.servers[1].log.len(), 3);
     assert_eq!(sim.servers[0].commit_index, 0);
+}
+
+#[test]
+fn gadaa_round_robin_in_order() {
+    let mut sim = Sim::new(Config {
+        client_interval: 50_000,
+        seed: 4,
+        ..Config::gadaa()
+    });
+    sim.advance_to(60_000_000); // 60 s = 75 terms of 800 ms
+    let st = &sim.stats;
+    assert!(st.successions >= 70, "successions {}", st.successions);
+    assert!(
+        st.in_order_successions * 100 >= st.successions * 95,
+        "{} of {}",
+        st.in_order_successions,
+        st.successions
+    );
+    let lt = sim.leader_time();
+    let (lo, hi) = (*lt.iter().min().unwrap(), *lt.iter().max().unwrap());
+    assert!(hi - lo < 1_200_000, "tenure imbalance {lt:?}");
+    assert!(sim.checker.violations.is_empty());
 }
 
 /// The checker must catch a real violation, not just stay quiet: force a

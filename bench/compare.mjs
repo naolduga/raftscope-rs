@@ -96,7 +96,7 @@ async function loadWasm() {
 }
 
 function runWasm(x, n, simUs, page) {
-  const p = x.rs_new(n, 1, 100_000, 10_000, 15_000, 50_000, 1, 0, LOAD);
+  const p = x.rs_new(n, 1, 100_000, 10_000, 15_000, 50_000, 1, 0, 0, 0, LOAD);
   const t0 = performance.now();
   if (page) {
     for (let t = DT; t <= simUs; t += DT) x.rs_seek(p, t);

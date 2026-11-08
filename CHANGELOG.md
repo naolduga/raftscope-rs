@@ -1,5 +1,13 @@
 # Changelog
 
+## gadaa branch
+
+- `Protocol::Rotation`: scheduled round-robin leadership on Raft's leadership-transfer extension (TimeoutNow), skipping a successor that does not take over.
+- `Config::gadaa()`: 5 parties, 800 ms terms. Gadaa preset in `lab.html`, with a term arc on the leader.
+- Succession metrics: in-order successions, hand-off latency, each server's share of time in office.
+- `raftscope-bench --gadaa` fault matrix; tests for rotation order and skipping.
+- Paper draft and the raw results it cites under `paper/`.
+
 ## 0.1.0
 
 First release: a Rust/WebAssembly port of RaftScope.

@@ -21,7 +21,7 @@ async function engines() {
 }
 
 function run(x) {
-  const p = x.rs_new(5, 42, 100_000, 10_000, 15_000, 50_000, 1, 0.02, 50_000);
+  const p = x.rs_new(5, 42, 100_000, 10_000, 15_000, 50_000, 1, 0.02, 0, 0, 50_000);
   for (let t = 100_000; t <= 5_000_000; t += 100_000) x.rs_seek(p, t); // via the timeline
   x.rs_op(p, 0, 2, 0); // stop S3
   x.rs_seek(p, 8_000_000);

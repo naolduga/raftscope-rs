@@ -30,7 +30,7 @@ export const OP = {
 
 export const DEFAULTS = {
   n: 5, seed: 1, electionTimeout: 100_000, minLatency: 10_000, maxLatency: 15_000,
-  rpcTimeout: 50_000, batchSize: 1, loss: 0,
+  rpcTimeout: 50_000, batchSize: 1, loss: 0, protocol: 'raft', termLength: 800_000,
   clientInterval: 0,
 };
 
@@ -49,7 +49,7 @@ class Simulation {
     this.x = x;
     this.opts = o;
     this.p = x.rs_new(o.n, o.seed, o.electionTimeout, o.minLatency, o.maxLatency, o.rpcTimeout,
-      o.batchSize, o.loss, o.clientInterval);
+      o.batchSize, o.loss, o.protocol === 'rotation' ? 1 : 0, o.termLength, o.clientInterval);
   }
   free() { if (this.p) this.x.rs_free(this.p); this.p = 0; }
   get time() { return this.x.rs_time(this.p); }

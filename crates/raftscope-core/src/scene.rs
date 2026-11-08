@@ -19,7 +19,7 @@
 
 #![allow(clippy::too_many_arguments)] // drawing primitives mirror Canvas 2D signatures
 
-use crate::sim::{Body, Role, Sim, INF};
+use crate::sim::{Body, Protocol, Role, Sim, INF};
 use std::f32::consts::PI;
 
 pub const STRIDE: usize = 10;
@@ -365,6 +365,28 @@ impl Scene {
                     1.0,
                 );
             }
+            // Rotation: the leader's remaining term as an accent arc.
+            if let (Role::Leader, Protocol::Rotation { term_length }) = (s.role, sim.cfg.protocol) {
+                let end = s.leader_since.saturating_add(term_length);
+                let frac = if s.transfer_to.is_some() {
+                    0.0
+                } else {
+                    (end.saturating_sub(now) as f32 / term_length.max(1) as f32).clamp(0.0, 1.0)
+                };
+                let a0 = -PI / 2.0;
+                if frac > 0.0 {
+                    self.arc(
+                        x,
+                        y,
+                        r + 9.0,
+                        a0,
+                        a0 + 2.0 * PI * frac,
+                        color::ACCENT,
+                        3.0,
+                        0.9,
+                    );
+                }
+            }
             if stopped {
                 self.circle(x, y, r, color::SURFACE, color::MUTED, 2.0, 1.0, true);
             } else {
@@ -423,6 +445,7 @@ impl Scene {
                 (1, r + 18.0)
             };
             let role = match s.role {
+                Role::Leader if s.transfer_to.is_some() => " · handing off",
                 Role::Leader => " · leader",
                 Role::Candidate => " · cand.",
                 Role::Stopped => " · down",

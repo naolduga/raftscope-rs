@@ -7,5 +7,5 @@ pub mod scene;
 pub mod sim;
 pub mod timeline;
 
-pub use sim::{Body, Config, Entry, Message, Role, Server, Sim, Time, INF};
+pub use sim::{Body, Config, Entry, Message, Protocol, Role, Server, Sim, Time, INF};
 pub use timeline::{Op, Timeline};

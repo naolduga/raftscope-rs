@@ -124,7 +124,9 @@ kbd { font: 11px var(--font-data); border: 1px solid var(--line); border-radius:
   <div class="legend" aria-label="Legend">
     <span><i style="background:var(--msg-vote)"></i>RequestVote</span>
     <span><i style="background:var(--msg-append)"></i>AppendEntries</span>
+    <span><i style="background:var(--msg-transfer)"></i>TimeoutNow (hand-off)</span>
     <span><i style="border:2px solid var(--muted)"></i>hollow = reply</span>
+    <span>gold arc = leader's remaining term (Gadaa)</span>
     <span>fill colour = term · faded log cell = not yet committed · grey arc = election timer</span>
   </div>
 
@@ -165,6 +167,13 @@ kbd { font: 11px var(--font-data); border: 1px solid var(--line); border-radius:
       <div class="form">
         <label>Servers<input id="f-n" type="number" min="1" max="5000" value="5"></label>
         <label>Seed<input id="f-seed" type="number" min="0" value="1"></label>
+        <label class="wide">Protocol
+          <select id="f-proto">
+            <option value="gadaa" selected>Gadaa round-robin (fixed order, term limit)</option>
+            <option value="raft">Raft (as in RaftScope)</option>
+          </select>
+        </label>
+        <label>Term per party (ms)<input id="f-term" type="number" min="10" value="800"></label>
         <label>Message loss (%)<input id="f-loss" type="number" min="0" max="100" step="1" value="0"></label>
         <label>Election timeout (ms)<input id="f-et" type="number" min="5" value="100"></label>
         <label>Auto requests every (ms, 0 = off)<input id="f-load" type="number" min="0" value="100"></label>
@@ -172,12 +181,12 @@ kbd { font: 11px var(--font-data); border: 1px solid var(--line); border-radius:
         <label>Latency min–max (ms)<input id="f-lat" type="text" value="10-15" inputmode="numeric"></label>
       </div>
       <div class="row"><button class="primary" id="reset">Apply &amp; restart</button></div>
-      <p class="hint">Same seed and same actions give the same run, every time.</p>
+      <p class="hint">Gadaa: each server is a party; leadership passes S1 → S2 → … in order after each term, skipping a party that cannot take over. 800 ms stands for the eight-year term. Same seed and same actions give the same run, every time.</p>
     </section>
 
     <section class="panel" aria-labelledby="h-bench">
       <h2 id="h-bench">Benchmark</h2>
-      <p class="hint">Runs the simulator headless in this tab: 10 simulated seconds per size, a client request every 50 ms, current settings.</p>
+      <p class="hint">Runs the simulator headless in this tab: 10 simulated seconds per size, a client request every 50 ms, current protocol settings.</p>
       <div class="row"><button id="bench">Run benchmark</button></div>
       <div class="tablewrap"><table id="bench-t" hidden>
         <thead><tr><th>servers</th><th>wall ms</th><th>× real time</th><th>events/s</th><th>elections</th><th>p50 commit</th></tr></thead>
@@ -227,6 +236,8 @@ function readSetup() {
   return {
     n: Math.max(1, Math.min(5000, Math.round(num('f-n', 5)))),
     seed: Math.max(0, Math.round(num('f-seed', 1))),
+    protocol: $('f-proto').value === 'gadaa' ? 'rotation' : 'raft',
+    termLength: num('f-term', 2000) * 1000,
     loss: Math.max(0, Math.min(1, num('f-loss', 0) / 100)),
     electionTimeout: num('f-et', 100) * 1000,
     rpcTimeout: num('f-et', 100) * 500,
@@ -308,10 +319,16 @@ function updatePanels() {
     ['lost (loss, partition)', fmt(st.lost)],
     ['elections started', fmt(st.elections)],
     ['leaders elected', fmt(st.leaders)],
+    ['leader hand-offs', fmt(st.transfers)],
     ['client requests', `${fmt(st.requests)} (${fmt(st.rejected)} rejected)`],
     ['commit latency p50 / p99', st.committed ? `${ms(st.p50)} / ${ms(st.p99)}` : '—'],
     ['time without a leader', ms(st.leaderless)],
     ['down / isolated', `${st.stopped} / ${st.partitioned}`],
+    ...(st.rotation ? [
+      ['successions in order', st.successions ? `${fmt(st.inOrder)} of ${fmt(st.successions)}` : '—'],
+      ['hand-off time p50', st.handoffs ? ms(st.handoffP50) : '—'],
+      ['share of time led', st.leaderTime.length && st.time ? st.leaderTime.map((v, i) => `S${i + 1} ${Math.round(v / st.time * 100)}%`).join(' · ') : '—'],
+    ] : []),
   ]);
   const v = $('viol');
   v.hidden = !st.violationCount;
@@ -338,6 +355,7 @@ function updateInspector() {
       ['partition', info.group ? `isolated (group ${info.group})` : 'connected'],
     ];
     if (info.role === 'candidate') rows.push(['votes granted', info.votes + 1]);
+    if (info.transferTo >= 0) rows.push(['handing off to', `S${info.transferTo + 1}`]);
     if (info.peers) rows.push(['next / match', info.peers.map((p) => `S${p.id + 1}:${p.next}/${p.match}`).join('  ')]);
     kv(insp, rows);
     $('isolate').textContent = info.group ? 'Reconnect' : 'Isolate';
@@ -380,6 +398,10 @@ $('spread').onclick = () => sim.op(OP.spreadTimers);
 $('align').onclick = () => sim.op(OP.alignTimers);
 $('scenario').onclick = () => { sim.op(OP.logReplicationScenario); updatePanels(); };
 $('reset').onclick = reset;
+$('f-proto').addEventListener('change', () => {
+  if ($('f-proto').value === 'gadaa') { $('f-n').value = 5; $('f-term').value = 800; }
+  reset();
+});
 
 function setPlaying(p) { playing = p; $('play').textContent = p ? 'Pause' : 'Play'; }
 $('play').onclick = () => setPlaying(!playing);

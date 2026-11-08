@@ -11,7 +11,7 @@
 //! `rs_text` and `rs_out` stay valid until the next call on the same handle.
 
 use raftscope_core::scene::{preferred_height, Scene, ViewOpts};
-use raftscope_core::sim::{Body, Config, Role};
+use raftscope_core::sim::{Body, Config, Protocol, Role};
 use raftscope_core::timeline::{Op, Timeline};
 use std::fmt::Write;
 
@@ -37,6 +37,8 @@ pub extern "C" fn rs_new(
     rpc_timeout: f64,
     batch_size: u32,
     loss: f64,
+    protocol: u32,
+    term_length: f64,
     client_interval: f64,
 ) -> *mut App {
     let cfg = Config {
@@ -48,6 +50,13 @@ pub extern "C" fn rs_new(
         rpc_timeout: (rpc_timeout as u64).max(1),
         batch_size: batch_size.max(1),
         loss: loss.clamp(0.0, 1.0),
+        protocol: if protocol == 1 {
+            Protocol::Rotation {
+                term_length: (term_length as u64).max(1),
+            }
+        } else {
+            Protocol::Raft
+        },
         client_interval: client_interval.max(0.0) as u64,
     };
     Box::into_raw(Box::new(App {
@@ -232,7 +241,7 @@ pub unsafe extern "C" fn rs_stats(p: *mut App) -> u32 {
         o,
         "{{\"time\":{},\"horizon\":{},\"n\":{},\"leader\":{},\"leaderTerm\":{},\"maxTerm\":{},\"inFlight\":{},\
 \"elections\":{},\"leaders\":{},\"sent\":{},\"delivered\":{},\"lost\":{},\"ruleEvals\":{},\
-\"requests\":{},\"rejected\":{},\"committed\":{},\"p50\":{},\"p99\":{},\"leaderless\":{},\
+\"requests\":{},\"rejected\":{},\"committed\":{},\"transfers\":{},\"p50\":{},\"p99\":{},\"leaderless\":{},\
 \"stopped\":{},\"partitioned\":{},\"violations\":[",
         sim.time,
         a.tl.horizon,
@@ -250,6 +259,7 @@ pub unsafe extern "C" fn rs_stats(p: *mut App) -> u32 {
         st.client_requests,
         st.client_rejected,
         st.committed,
+        st.transfers,
         p50,
         p99,
         st.leaderless_time,
@@ -261,6 +271,26 @@ pub unsafe extern "C" fn rs_stats(p: *mut App) -> u32 {
             o.push(',');
         }
         let _ = write!(o, "\"{}\"", esc(v));
+    }
+    let hl = &st.handoff_latencies;
+    let hp50 = if hl.is_empty() {
+        0
+    } else {
+        let mut v = hl.clone();
+        v.sort_unstable();
+        v[v.len() / 2]
+    };
+    let _ = write!(o, "],\"successions\":{},\"inOrder\":{},\"handoffP50\":{},\"handoffs\":{},\"rotation\":{},\"termLength\":{},\"leaderTime\":[",
+        st.successions, st.in_order_successions, hp50, hl.len(),
+        matches!(sim.cfg.protocol, Protocol::Rotation { .. }),
+        match sim.cfg.protocol { Protocol::Rotation { term_length } => term_length, _ => 0 });
+    if sim.n() <= 64 {
+        for (i, v) in sim.leader_time().iter().enumerate() {
+            if i > 0 {
+                o.push(',');
+            }
+            let _ = write!(o, "{v}");
+        }
     }
     let _ = write!(o, "],\"violationCount\":{}}}", sim.checker.violations.len());
     a.out = o;
@@ -283,7 +313,7 @@ pub unsafe extern "C" fn rs_server(p: *mut App, id: u32) -> u32 {
         let _ = write!(
             o,
             "{{\"id\":{},\"role\":\"{}\",\"term\":{},\"votedFor\":{},\"logLength\":{},\"commitIndex\":{},\
-\"electionAlarm\":{},\"group\":{},\"votes\":{}",
+\"electionAlarm\":{},\"group\":{},\"votes\":{},\"transferTo\":{}",
             s.id,
             role_name(s.role),
             s.term,
@@ -293,6 +323,7 @@ pub unsafe extern "C" fn rs_server(p: *mut App, id: u32) -> u32 {
             alarm,
             s.group,
             s.votes,
+            s.transfer_to.map_or(-1, |v| v as i64),
         );
         if s.role == Role::Leader && sim.n() <= 64 {
             o.push_str(",\"peers\":[");
@@ -344,6 +375,7 @@ pub unsafe extern "C" fn rs_message(p: *mut App, seq: f64) -> u32 {
                 "AppendEntries reply",
                 format!("\"success\":{success},\"matchIndex\":{match_index}"),
             ),
+            Body::TimeoutNow => ("TimeoutNow", String::from("\"handoff\":true")),
         };
         let _ = write!(
             o,

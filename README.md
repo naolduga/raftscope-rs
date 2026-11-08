@@ -4,6 +4,8 @@ A drop-in replacement for [RaftScope](https://github.com/ongardie/raftscope), th
 
 ![RaftScope.rs: five servers on a ring, the leader S2 replicating log entries](docs/screenshot.png)
 
+> **This is the `gadaa` branch.** It adds a case study on top of `main`: Gadaa-style round-robin leadership on Raft, with its benchmark and a paper draft. For the plain drop-in replacement, use `main`. [What this branch adds](#gadaa-round-robin-succession).
+
 The protocol is a rule-for-rule port of RaftScope's `raft.js`, with the same constants, the same controls and the same keyboard shortcuts. What changes is the engine underneath:
 
 | | RaftScope (`raft.js`, 2014) | RaftScope.rs |
@@ -117,10 +119,38 @@ node bench/compare.mjs /tmp/raftscope
 
 No run reported a safety violation. With RaftScope's teaching parameters the simulator also shows three things: split votes grow with cluster size, one entry per message caps throughput near 40 entries/s, and a 50 ms heartbeat is fragile under message loss.
 
+## Gadaa round-robin succession
+
+Gadaa, the democratic system of the Oromo people, passes power between five parties in a fixed order, each for an eight-year term. This branch models that succession on Raft, using Raft's leadership-transfer extension (Ongaro's dissertation, §3.10):
+
+1. After `term_length` in office, the leader stops accepting client requests and starts a hand-off to its successor, `(id + 1) mod n`.
+2. It replicates until the successor's log matches its own, then sends `TimeoutNow`; the successor stands for election at once and wins in one round.
+3. If no new leader appears within one election timeout, the next party in order is tried, so a party that is down or cut off is skipped.
+
+Elections, replication and commitment stay unchanged Raft, so the safety checks still apply. `Config::gadaa()` gives 5 parties and 800 ms terms (`GADAA_TERM`: eight years compressed, 1 simulated ms ≈ 3.65 days). In `lab.html` the Gadaa preset is the default; the leader's remaining term shows as a gold arc, and the statistics add in-order successions, hand-off time and each party's share of time in office.
+
+```sh
+cargo run --release -p raftscope-bench -- --gadaa                  # fault matrix, 750 terms per run
+cargo run --release -p raftscope-bench -- --protocol both --term 800
+```
+
+Results ([bench/results/gadaa.md](bench/results/gadaa.md)):
+
+| Scenario | In-order successions | Hand-off p50 / p99 | Share of time led |
+|---|---:|---:|---:|
+| Healthy | 100.0% | 50 / 59 ms | 19.7–19.8% |
+| 1 party down | 75.0% (3 of 4, as expected) | 51 / 141 ms | 0–26.7% |
+| 10% message loss | 44.1% | 134 / 340 ms | 0.1–35.2% |
+| Partitions, 3 s of every 10 s | 23.9% | 137 / 340 ms | 0.3–43.6% |
+
+Safety held in every run. Ordinary elections caused by faults break the fixed order; a rule that lets only the scheduled successor stand early in its term is the open design question.
+
+The paper draft is in [paper/paper.md](paper/paper.md), with the raw benchmark output it cites in [paper/results/](paper/results/).
+
 ## Branches
 
 - `main`: this drop-in replacement, plain Raft only.
-- `gadaa`: a case study built on it. Gadaa-style round-robin leadership (five parties, fixed order, 800 ms terms) on Raft's leadership-transfer mechanism, with its benchmarks and paper.
+- `gadaa` (this branch): a case study built on it. Gadaa-style round-robin leadership (five parties, fixed order, 800 ms terms) on Raft's leadership-transfer mechanism, with its benchmarks and paper.
 
 ## Licence
 

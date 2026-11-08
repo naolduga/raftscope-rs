@@ -12,6 +12,9 @@
 //! * **Deterministic.** All randomness comes from a seeded [`Rng`] that is part
 //!   of the state.
 //! * **Checked.** A [`Checker`] verifies Raft's safety properties online.
+//! * **Extensible.** [`Protocol::Rotation`] adds leader rotation built on Raft's
+//!   leadership-transfer extension (TimeoutNow), as a hook for rotation-based
+//!   governance protocols.
 
 use crate::rng::Rng;
 use std::cmp::Reverse;
@@ -20,6 +23,17 @@ use std::collections::{BinaryHeap, VecDeque};
 /// Simulated time in microseconds (same unit as `raft.js`).
 pub type Time = u64;
 pub const INF: Time = u64::MAX;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Protocol {
+    /// Plain Raft, as in RaftScope.
+    Raft,
+    /// Raft plus scheduled leadership hand-off: after `term_length` of
+    /// leadership the leader stops taking requests, brings its successor
+    /// `(id + 1) mod n` up to date, and sends it TimeoutNow. If the successor
+    /// does not take over within one election timeout, the next one is tried.
+    Rotation { term_length: Time },
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -32,10 +46,31 @@ pub struct Config {
     /// Probability that any single message is lost in transit.
     pub loss: f64,
     pub seed: u64,
+    pub protocol: Protocol,
     /// If non-zero, a client submits one request to the current leader every
     /// `client_interval` microseconds (open-loop load for benchmarks).
     pub client_interval: Time,
 }
+
+impl Config {
+    /// Gadaa-style succession: five parties take office in a fixed
+    /// round-robin order, each for a fixed term. Eight years of real time are
+    /// compressed to 800 ms of simulated time (one simulated millisecond per
+    /// ~3.65 days), long enough for dozens of heartbeats and client requests
+    /// per term at RaftScope's message latencies.
+    pub fn gadaa() -> Self {
+        Config {
+            n: 5,
+            protocol: Protocol::Rotation {
+                term_length: GADAA_TERM,
+            },
+            ..Config::default()
+        }
+    }
+}
+
+/// Default Gadaa term in simulated microseconds (800 ms).
+pub const GADAA_TERM: Time = 800_000;
 
 impl Default for Config {
     /// The constants from `raft.js`.
@@ -49,6 +84,7 @@ impl Default for Config {
             batch_size: 1,
             loss: 0.0,
             seed: 1,
+            protocol: Protocol::Raft,
             client_interval: 0,
         }
     }
@@ -94,6 +130,11 @@ pub struct Server {
     acks: VecDeque<u32>,
     /// Network partition group; messages only flow within a group.
     pub group: u32,
+    // Rotation (leadership transfer) state.
+    pub leader_since: Time,
+    pub transfer_to: Option<u32>,
+    pub transfer_deadline: Time,
+    pub timeout_now_sent: bool,
 }
 
 impl Server {
@@ -116,6 +157,10 @@ impl Server {
             peer_heap: BinaryHeap::new(),
             acks: VecDeque::new(),
             group: 0,
+            leader_since: 0,
+            transfer_to: None,
+            transfer_deadline: INF,
+            timeout_now_sent: false,
         }
     }
 
@@ -133,6 +178,9 @@ impl Server {
         self.peer_due = Vec::new();
         self.peer_heap = BinaryHeap::new();
         self.acks = VecDeque::new();
+        self.transfer_to = None;
+        self.transfer_deadline = INF;
+        self.timeout_now_sent = false;
     }
 }
 
@@ -164,17 +212,22 @@ pub enum Body {
         success: bool,
         match_index: u32,
     },
+    TimeoutNow,
 }
 
 impl Body {
     pub fn is_request(&self) -> bool {
-        matches!(self, Body::RequestVote { .. } | Body::AppendEntries { .. })
+        matches!(
+            self,
+            Body::RequestVote { .. } | Body::AppendEntries { .. } | Body::TimeoutNow
+        )
     }
-    /// 0 = RequestVote, 1 = AppendEntries.
+    /// 0 = RequestVote, 1 = AppendEntries, 2 = TimeoutNow.
     pub fn kind(&self) -> u8 {
         match self {
             Body::RequestVote { .. } | Body::RequestVoteReply { .. } => 0,
             Body::AppendEntries { .. } | Body::AppendEntriesReply { .. } => 1,
+            Body::TimeoutNow => 2,
         }
     }
 }
@@ -204,10 +257,22 @@ pub struct Stats {
     pub client_requests: u64,
     pub client_rejected: u64,
     pub committed: u64,
+    pub transfers: u64,
     /// Submit-to-commit latency of each committed client entry (µs).
     pub commit_latencies: Vec<u32>,
     /// Time intervals with no leader anywhere (µs), measured between leaders.
     pub leaderless_time: Time,
+    /// Leadership changes (a different server became leader).
+    pub successions: u64,
+    /// Successions where the new leader is the previous leader's successor
+    /// in the fixed order, (prev + 1) mod n.
+    pub in_order_successions: u64,
+    /// Time from a scheduled hand-off starting to the next leader taking
+    /// office (µs), one entry per completed rotation.
+    pub handoff_latencies: Vec<u32>,
+    /// Total time each server has spent as leader (µs), closed tenures only;
+    /// see [`Sim::leader_time`] for totals including the current tenure.
+    pub leader_time: Vec<Time>,
 }
 
 /// Online checker for Raft's safety properties (Raft paper, Figure 3).
@@ -367,6 +432,9 @@ pub struct Sim {
     /// Last server known to have become leader (hint for client routing).
     pub leader_hint: Option<u32>,
     no_leader_since: Option<Time>,
+    last_leader: Option<u32>,
+    transfer_started: Option<Time>,
+    tenure_start: Vec<Option<Time>>,
     pub stats: Stats,
     pub checker: Checker,
     commit_buf: Vec<Entry>,
@@ -395,6 +463,9 @@ impl Sim {
             submit_time: Vec::new(),
             leader_hint: None,
             no_leader_since: Some(0),
+            last_leader: None,
+            transfer_started: None,
+            tenure_start: vec![None; n],
             stats: Stats::default(),
             checker: Checker::default(),
             commit_buf: Vec::new(),
@@ -416,6 +487,16 @@ impl Sim {
 
     pub fn messages_in_flight(&self) -> usize {
         self.net.live
+    }
+
+    /// Total time each server has led, including any tenure still running.
+    pub fn leader_time(&self) -> Vec<Time> {
+        (0..self.n())
+            .map(|i| {
+                self.stats.leader_time.get(i).copied().unwrap_or(0)
+                    + self.tenure_start[i].map_or(0, |t0| self.time - t0)
+            })
+            .collect()
     }
 
     /// The highest-term live leader, if any.
@@ -461,7 +542,15 @@ impl Sim {
             }
             Role::Leader => {
                 // May be stale (too early); a spurious wake is harmless.
-                s.peer_heap.peek().map_or(INF, |r| r.0 .0)
+                let mut t = s.peer_heap.peek().map_or(INF, |r| r.0 .0);
+                if let Protocol::Rotation { term_length } = self.cfg.protocol {
+                    if s.transfer_to.is_none() {
+                        t = t.min(s.leader_since.saturating_add(term_length));
+                    } else {
+                        t = t.min(s.transfer_deadline);
+                    }
+                }
+                t
             }
         }
     }
@@ -540,6 +629,7 @@ impl Sim {
         self.start_new_election(id);
         self.become_leader(id);
         self.advance_commit_index(id);
+        self.rotation(id);
         match self.servers[id as usize].role {
             Role::Candidate => {
                 for peer in 0..self.n() as u32 {
@@ -553,7 +643,7 @@ impl Sim {
         }
     }
 
-    /// Leader: send AppendEntries to every peer that is due.
+    /// Leader: send AppendEntries (or TimeoutNow) to every peer that is due.
     fn service_due_peers(&mut self, id: u32) {
         let now = self.time;
         loop {
@@ -586,6 +676,9 @@ impl Sim {
         let mut due = s.heartbeat_due[i];
         if s.next_index[i] <= len {
             due = due.min(s.rpc_due[i]);
+        }
+        if s.transfer_to == Some(p) && !s.timeout_now_sent && s.match_index[i] == len {
+            due = 0;
         }
         if due != s.peer_due[i] {
             s.peer_due[i] = due;
@@ -643,10 +736,32 @@ impl Sim {
         s.acks = (s.commit_index..len).map(|_| 1).collect();
         s.vote_granted = Vec::new();
         s.election_alarm = INF;
+        s.leader_since = now;
+        s.transfer_to = None;
+        s.transfer_deadline = INF;
+        s.timeout_now_sent = false;
         self.refresh_all_peers(id);
         self.checker.on_leader(&self.servers[id as usize], now);
         self.stats.leaders_elected += 1;
         self.leader_hint = Some(id);
+        let n32 = self.n() as u32;
+        if let Some(prev) = self.last_leader {
+            if prev != id {
+                self.stats.successions += 1;
+                if id == (prev + 1) % n32 {
+                    self.stats.in_order_successions += 1;
+                }
+            }
+        }
+        self.last_leader = Some(id);
+        if let Some(t0) = self.transfer_started.take() {
+            self.stats
+                .handoff_latencies
+                .push((now - t0).min(u32::MAX as u64) as u32);
+        }
+        if self.tenure_start[id as usize].is_none() {
+            self.tenure_start[id as usize] = Some(now);
+        }
         if let Some(since) = self.no_leader_since.take() {
             self.stats.leaderless_time += now - since;
         }
@@ -701,6 +816,48 @@ impl Sim {
         self.commit_buf = buf;
     }
 
+    fn rotation(&mut self, id: u32) {
+        let Protocol::Rotation { term_length } = self.cfg.protocol else {
+            return;
+        };
+        let now = self.time;
+        let n = self.n() as u32;
+        let et = self.cfg.election_timeout;
+        let s = &mut self.servers[id as usize];
+        if s.role != Role::Leader || n < 2 {
+            return;
+        }
+        match s.transfer_to {
+            None => {
+                if now >= s.leader_since.saturating_add(term_length) {
+                    s.transfer_to = Some((id + 1) % n);
+                    s.transfer_deadline = now + et;
+                    s.timeout_now_sent = false;
+                    self.stats.transfers += 1;
+                    self.transfer_started = Some(now);
+                    self.refresh_peer(id, (id + 1) % n);
+                }
+            }
+            Some(target) => {
+                if now >= s.transfer_deadline {
+                    let next = (target + 1) % n;
+                    if next == id {
+                        // Went all the way round: nobody took over; serve another term.
+                        s.transfer_to = None;
+                        s.transfer_deadline = INF;
+                        s.leader_since = now;
+                        self.transfer_started = None;
+                    } else {
+                        s.transfer_to = Some(next);
+                        s.transfer_deadline = now + et;
+                        s.timeout_now_sent = false;
+                        self.refresh_peer(id, next);
+                    }
+                }
+            }
+        }
+    }
+
     fn send_request_vote(&mut self, id: u32, peer: u32) {
         let now = self.time;
         let rpc_timeout = self.cfg.rpc_timeout;
@@ -730,6 +887,14 @@ impl Sim {
             return;
         }
         let len = s.log.len() as u32;
+        // Leadership transfer: once the target has caught up, tell it to run.
+        if s.transfer_to == Some(peer) && !s.timeout_now_sent && s.match_index[p] == len {
+            s.timeout_now_sent = true;
+            let term = s.term;
+            self.send(id, peer, term, Body::TimeoutNow);
+            return;
+        }
+        let s = &mut self.servers[id as usize];
         if !(s.heartbeat_due[p] <= now || (s.next_index[p] <= len && s.rpc_due[p] <= now)) {
             return;
         }
@@ -807,6 +972,7 @@ impl Sim {
                 success,
                 match_index,
             } => self.on_append_entries_reply(&m, success, match_index),
+            Body::TimeoutNow => self.on_timeout_now(&m),
         }
         // Re-evaluate only what the message could have changed.
         match self.servers[to as usize].role {
@@ -855,6 +1021,17 @@ impl Sim {
     }
 
     fn note_leader_gone(&mut self) {
+        let now = self.time;
+        if self.stats.leader_time.len() < self.servers.len() {
+            self.stats.leader_time.resize(self.servers.len(), 0);
+        }
+        for (i, s) in self.servers.iter().enumerate() {
+            if s.role != Role::Leader {
+                if let Some(t0) = self.tenure_start[i].take() {
+                    self.stats.leader_time[i] += now - t0;
+                }
+            }
+        }
         if self.no_leader_since.is_none() && !self.servers.iter().any(|s| s.role == Role::Leader) {
             self.no_leader_since = Some(self.time);
         }
@@ -992,6 +1169,18 @@ impl Sim {
         }
     }
 
+    fn on_timeout_now(&mut self, m: &Message) {
+        let id = m.to;
+        if self.servers[id as usize].term < m.term {
+            self.step_down(id, m.term);
+        }
+        let s = &mut self.servers[id as usize];
+        if s.term == m.term && s.role != Role::Leader {
+            s.role = Role::Follower;
+            s.election_alarm = 0;
+        }
+    }
+
     // --------------------------------------------------------- user actions
 
     pub fn stop(&mut self, id: u32) {
@@ -1049,7 +1238,7 @@ impl Sim {
         let now = self.time;
         self.stats.client_requests += 1;
         let s = &mut self.servers[id as usize];
-        if s.role != Role::Leader {
+        if s.role != Role::Leader || s.transfer_to.is_some() {
             self.stats.client_rejected += 1;
             return false;
         }
